@@ -26,15 +26,15 @@ The Docker build fetches one pinned upstream commit and builds it unchanged.
 ## How it fits together
 
 ```
-TITAN dashboard (GitHub Pages)              Hugging Face Space (this repo)
+TITAN dashboard (GitHub Pages)              Free host (Render, this repo's image)
   |                                           |
   |  1. GET /gev/token  (admin token)         |
   |------------------> TITAN Worker           |
   |  2. signed token, valid 5 minutes         |
   |<------------------                        |
   |                                           |
-  |  3. iframe src = Space URL + ?gev_token=  |
-  |------------------------------------------>  gateway (port 7860)
+  |  3. iframe src = host URL + ?gev_token=   |
+  |------------------------------------------>  gateway (PORT)
   |                                              | verifies the token, sets a session cookie
   |                                              v
   |                                            God's Eye View preview server (127.0.0.1:4173)
@@ -44,9 +44,18 @@ The app needs a Node server. Its live data proxies run as Vite middleware, so a 
 cannot serve it. The gateway is the only listener the internet can reach. The app listens on
 loopback only.
 
+## Where it runs
+
+**Render's free web service.** Hugging Face now requires a paid PRO plan to create a Docker Space, so it
+cannot serve this app for $0. [docs/HOSTING.md](docs/HOSTING.md) compares the free options with sources
+and explains the choice.
+
+The image fits Render's 512 MB limit. A test under `--memory 512m` and `--cpus 0.1` with 19 live layers on
+peaked at 205 MiB and was never killed.
+
 ## Security model
 
-The Space URL is public, so the gateway never acts as an open proxy.
+The host URL is public, so the gateway never acts as an open proxy.
 
 - **Access token.** The TITAN Worker mints `gev1.<iat>.<exp>.<id>.<signature>`. The signature is
   HMAC-SHA256 over the first four parts with `GEV_SHARED_SECRET`. A token lives 5 minutes. The
@@ -61,8 +70,12 @@ The Space URL is public, so the gateway never acts as an open proxy.
   says which check failed.
 - **Fails closed.** If `GEV_SHARED_SECRET` is missing or shorter than 32 characters, every gated route
   returns 401.
-- **Rate limits.** API routes allow 1200 requests per minute for each session. Requests without a valid
-  session allow 30 per minute for each client address. Limits live in memory and reset on restart.
+- **Rate limits.** API routes allow 1200 requests per minute for each session. Failed attempts without a
+  valid session allow 30 per minute for each client address. A valid redemption never spends that budget.
+  Limits live in memory and reset on restart.
+- **Client address.** Behind Render's Cloudflare layer the first `X-Forwarded-For` entries are client
+  controlled. Set `GEV_CLIENT_IP_HEADER=cf-connecting-ip` and the gateway reads that header and never
+  reads `X-Forwarded-For`.
 - **Framing.** The app sends `X-Frame-Options: DENY` to protect its Provider Settings page. The
   gateway replaces that with `frame-ancestors` set to the dashboard origin and nothing else.
 - **Provider Settings stays off.** The preview server does not register the key saving routes at all.
@@ -75,7 +88,7 @@ The Space URL is public, so the gateway never acts as an open proxy.
 - **Logs.** The gateway never logs a query string, a cookie, or a secret.
 
 If the browser still drops the cookie, the embedded page tells the dashboard. The dashboard then points
-you to **Open full screen**, which loads the Space as a top level page where the cookie always works.
+you to **Open full screen**, which loads the host as a top level page where the cookie always works.
 
 ## Secrets and settings
 
@@ -83,14 +96,15 @@ Secrets live in the host's secret store. Never put a value in git, a URL, or a c
 
 | Name | Where | Needed | Purpose |
 | --- | --- | --- | --- |
-| `GEV_SHARED_SECRET` | Space secret and Worker secret | Yes | Signs and checks access tokens. Use 32 or more random characters. |
-| `CESIUM_ION_TOKEN` | Space secret | No | Free Cesium ion token. Without it the globe uses the keyless basemap. |
-| `HF_TOKEN` | GitHub repository secret | For sync | Write token that lets the workflow update the Space. |
-| `GEV_FRAME_ANCESTORS` | Space variable | No | Space separated dashboard origins. Defaults to `https://shreyas-tech7.github.io`. |
-| `HF_SPACE_ID` | GitHub repository variable | No | Space to sync. Defaults to `Cozmik7/titan-gev`. |
-| `OPENSKY_CLIENT_ID`, `OPENSKY_CLIENT_SECRET`, `TOMTOM_API_KEY`, `FIRMS_MAP_KEY`, `AISSTREAM_API_KEY`, `LL2_API_TOKEN` | Space secrets | No | Optional free provider keys. The globe works without them. |
+| `GEV_SHARED_SECRET` | Render secret and Worker secret (the same value) | Yes | Signs and checks access tokens. Use 32 or more random characters. |
+| `CESIUM_ION_TOKEN` | Render secret | No | Free Cesium ion token. Without it the globe uses the keyless basemap. |
+| `GEV_FRAME_ANCESTORS` | Render variable (the blueprint sets it) | No | Space separated dashboard origins. Defaults to `https://shreyas-tech7.github.io`. |
+| `GEV_CLIENT_IP_HEADER` | Render variable (the blueprint sets it) | On Render | Header that carries the real client address. `cf-connecting-ip` on Render. |
+| `GEV_APP_HEAP_MB` | Render variable | No | V8 heap cap for the app process. Defaults to 256. |
+| `OPENSKY_CLIENT_ID`, `OPENSKY_CLIENT_SECRET`, `TOMTOM_API_KEY`, `FIRMS_MAP_KEY`, `AISSTREAM_API_KEY`, `LL2_API_TOKEN` | Render secrets | No | Optional free provider keys. The globe works without them. |
+| `HF_TOKEN`, `HF_SPACE_ID` | GitHub secret and variable | Only for Hugging Face | Used by the optional sync to a Hugging Face Space (needs PRO). |
 
-Restrict the Cesium ion token under **Allowed URLs** to the Space origin. A Cesium ion token is meant for
+Restrict the Cesium ion token under **Allowed URLs** to the host origin. A Cesium ion token is meant for
 browsers, so treat it as a quota guard and not as a secret.
 
 The app process never sees `GEV_SHARED_SECRET`, `HF_TOKEN`, or the paid OpenAI and Google keys.
@@ -98,37 +112,42 @@ The app process never sees `GEV_SHARED_SECRET`, `HF_TOKEN`, or the paid OpenAI a
 Other tuning variables: `GEV_SESSION_IDLE_SECONDS`, `GEV_SESSION_MAX_SECONDS`, `GEV_RATE_API_PER_MIN`,
 `GEV_RATE_UNAUTH_PER_MIN`, `GEV_MAX_BODY_BYTES`, and `GEV_TRUST_PROXY_HOPS`. See `server/config.mjs`.
 
-## Deploy on Hugging Face (free, no card)
+## Deploy on Render (free, no card)
 
-1. Create a Space with the **Docker** SDK, a blank template, and the name `titan-gev`. Keep it public.
-2. In the Space settings, add the secrets `GEV_SHARED_SECRET` and `CESIUM_ION_TOKEN`. Add the variable
-   `GEV_FRAME_ANCESTORS` only if the dashboard origin is not `https://shreyas-tech7.github.io`.
-3. In this GitHub repository, add the secret `HF_TOKEN` (a Hugging Face token with write access to the
-   Space). Add the variable `HF_SPACE_ID` if the Space is not `Cozmik7/titan-gev`.
-4. Push to `main`, or run the **Build and sync** workflow by hand. The workflow uploads the build inputs to
-   the Space, and Hugging Face builds the image.
-5. In the dashboard build, set `NEXT_PUBLIC_GEV_URL` to the Space URL, for example
-   `https://cozmik7-titan-gev.hf.space`.
+1. Sign in at <https://dashboard.render.com> and connect your GitHub account.
+2. Choose **New**, then **Blueprint**, pick this repository, and apply `render.yaml`. It creates a free Docker
+   web service named `titan-gev`.
+3. Render asks for two values. Paste `GEV_SHARED_SECRET` (the same value that the Worker holds) and, if you have
+   one, `CESIUM_ION_TOKEN`. Leave the Cesium field blank to use the keyless basemap.
+4. Wait for the first build. It takes a few minutes. Read the service URL on the Render page. It is
+   `https://titan-gev.onrender.com` unless the name was taken.
+5. Set the dashboard repository variable `GEV_URL` to that URL and redeploy the dashboard.
+6. Run the live checks below.
 
-The sync uses the Hub upload API. It never force pushes.
+Render deploys again when a commit on `main` passes its GitHub checks. A free service sleeps after 15 idle
+minutes and wakes in about a minute. The dashboard tab shows a waking state and retries on its own.
 
-A free Space sleeps after a period of inactivity and wakes on the next visit. The dashboard tab shows
-a waking state and retries on its own.
+## Verify the live host
 
-## Verify the live Space
-
-After the Space builds, run the live checks from your own terminal.
+After the service is live, run the live checks from your own terminal.
 
 ```bash
-npm run verify:live -- https://cozmik7-titan-gev.hf.space
+npm run verify:live -- https://titan-gev.onrender.com
 ```
 
 The script asks for `GEV_SHARED_SECRET` with hidden input, so the value never reaches shell history, process
 arguments, or output. It checks that no token returns 401, a valid token returns 200, an expired token and a
 reused token are rejected, `frame-ancestors` names only the dashboard, Provider Settings and the paid voice
-route return 404, and no response contains the secret. A sleeping Space gets up to three minutes to wake.
+route return 404, and no response contains the secret. A sleeping host gets up to three minutes to wake.
 
 Then open the dashboard tab and confirm that the globe loads.
+
+## Optional: a Hugging Face Space
+
+A Docker Space needs a PRO plan. If you have one, create a Docker Space, add the secrets, and add the GitHub
+secret `HF_TOKEN` (plus the variable `HF_SPACE_ID` when the Space is not `Cozmik7/titan-gev`). The **Build and
+sync** workflow then uploads the build inputs with the Hub upload API. It never force pushes. Without
+`HF_TOKEN` the sync job skips with a notice.
 
 ## Update the upstream version
 
@@ -136,7 +155,7 @@ Then open the dashboard tab and confirm that the globe loads.
 2. Put its full 40 character hash in `UPSTREAM_COMMIT`.
 3. Open a pull request. The build check installs, runs `npm run doctor`, builds, and runs the gate tests
    against the new commit.
-4. Merge. The sync job updates the Space.
+4. Merge. Render deploys the new image.
 
 ## Codespaces fallback
 
@@ -162,7 +181,7 @@ Two limits apply:
 - **Codespaces sleeps when idle.** The globe disappears until you start the Codespace again.
 - **A private forwarded port cannot be embedded in TITAN.** GitHub asks the viewer to sign in, and a
   third party iframe cannot complete that. The port would have to be public, and then the dev server
-  has no gate. So the Space is the host the tab uses.
+  has no gate. So Render is the host the tab uses.
 
 ## Test it
 
