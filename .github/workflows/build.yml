@@ -1,0 +1,107 @@
+name: Build and sync
+
+# Three jobs. "build" checks the wrapper tests, the pinned upstream (npm ci and npm run doctor),
+# a production build of the app, and an end to end gate test against that build. "docker" builds the
+# same image that Hugging Face builds and probes it. "sync" pushes main to the Space when the
+# HF_TOKEN repository secret exists and skips with a notice when it does not.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Wrapper tests
+        run: npm test
+
+      - name: Fetch the pinned upstream commit
+        run: npm run upstream:fetch
+
+      - name: Install upstream dependencies (npm ci)
+        working-directory: .upstream
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+        run: npm ci --no-audit --no-fund
+
+      - name: Upstream setup doctor (npm run doctor)
+        working-directory: .upstream
+        run: npm run doctor
+
+      - name: Build upstream with the placeholder token
+        working-directory: .upstream
+        env:
+          CESIUM_ION_TOKEN: __GEV_CESIUM_ION_TOKEN__
+        run: npx vite build
+
+      - name: Gate smoke test against the real build
+        run: npm run smoke
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build the image
+        run: docker build -t titan-gev:ci .
+
+      - name: Run the image and probe the gate
+        run: |
+          secret="$(openssl rand -hex 24)"
+          docker run -d --name gev -p 127.0.0.1:17860:7860 -e GEV_SHARED_SECRET="$secret" titan-gev:ci
+          ready=""
+          for _ in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17860/healthz)" = "200" ]; then ready=yes; break; fi
+            sleep 2
+          done
+          [ -n "$ready" ] || { docker logs gev; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17860/)" = "401" ] || { echo "expected 401 without a token"; exit 1; }
+          if docker logs gev 2>&1 | grep -qF "$secret"; then echo "secret found in container logs"; exit 1; fi
+          docker rm -f gev
+
+  sync:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check for the HF_TOKEN secret
+        id: token
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -n "$HF_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HF_TOKEN is not set, so the Space sync was skipped."
+          fi
+
+      - name: Install the Hugging Face client
+        if: steps.token.outputs.present == 'true'
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet "huggingface_hub==1.33.0"
+
+      - name: Sync main to the Space
+        if: steps.token.outputs.present == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_ID: ${{ vars.HF_SPACE_ID || 'Cozmik7/titan-gev' }}
+        run: .venv/bin/python scripts/sync_to_space.py
