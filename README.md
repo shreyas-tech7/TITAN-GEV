@@ -115,6 +115,21 @@ The sync uses the Hub upload API. It never force pushes.
 A free Space sleeps after a period of inactivity and wakes on the next visit. The dashboard tab shows
 a waking state and retries on its own.
 
+## Verify the live Space
+
+After the Space builds, run the live checks from your own terminal.
+
+```bash
+npm run verify:live -- https://cozmik7-titan-gev.hf.space
+```
+
+The script asks for `GEV_SHARED_SECRET` with hidden input, so the value never reaches shell history, process
+arguments, or output. It checks that no token returns 401, a valid token returns 200, an expired token and a
+reused token are rejected, `frame-ancestors` names only the dashboard, Provider Settings and the paid voice
+route return 404, and no response contains the secret. A sleeping Space gets up to three minutes to wake.
+
+Then open the dashboard tab and confirm that the globe loads.
+
 ## Update the upstream version
 
 1. Pick a commit from <https://github.com/bilawalsidhu/gods-eye-view>.

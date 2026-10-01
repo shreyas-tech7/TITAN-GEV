@@ -14,6 +14,7 @@
     "upstream:build": "cd .upstream && PUPPETEER_SKIP_DOWNLOAD=1 npm ci --no-audit --no-fund && CESIUM_ION_TOKEN=__GEV_CESIUM_ION_TOKEN__ npx vite build",
     "start": "GEV_APP_DIR=.upstream node server/index.mjs",
     "dev:codespace": "cd .upstream && HOST=0.0.0.0 PORT=4173 npm run dev",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "verify:live": "node scripts/verify-live.mjs"
   }
 }
