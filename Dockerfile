@@ -1,5 +1,5 @@
 # TITAN-GEV image. Builds the pinned God's Eye View commit, then runs it behind the gate.
-# Hugging Face Spaces (Docker SDK) builds this file as is.
+# Render (free web service), Hugging Face Spaces (Docker SDK), and plain docker run all build this file as is.
 FROM node:24-bookworm-slim
 
 RUN apt-get update \
@@ -24,12 +24,12 @@ COPY server /app/server
 RUN chown -R node:node /app
 
 USER node
-ENV GEV_APP_DIR=/app/upstream \
-    GEV_LISTEN_PORT=7860
+# The gateway listens on GEV_LISTEN_PORT, then PORT (Render), then 7860 (Hugging Face).
+ENV GEV_APP_DIR=/app/upstream
 
 EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s \
-  CMD node -e "fetch('http://127.0.0.1:7860/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD ["node", "/app/server/healthcheck.mjs"]
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "/app/server/index.mjs"]

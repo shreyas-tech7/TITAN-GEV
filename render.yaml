@@ -1,0 +1,25 @@
+# Render Blueprint for the free web service. Create it with New, then Blueprint, and point it at this repo.
+# Render asks for the two sync:false values during that first creation and stores them as secrets.
+services:
+  - type: web
+    name: titan-gev
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    envVars:
+      # Required. At least 32 random characters. The Worker holds the same value.
+      - key: GEV_SHARED_SECRET
+        sync: false
+      # Optional. The free Cesium ion token. Leave it blank for the keyless basemap.
+      - key: CESIUM_ION_TOKEN
+        sync: false
+      # Only the TITAN dashboard origin may frame the globe.
+      - key: GEV_FRAME_ANCESTORS
+        value: https://shreyas-tech7.github.io
+      # Render puts Cloudflare in front, so X-Forwarded-For is not trustworthy.
+      - key: GEV_CLIENT_IP_HEADER
+        value: cf-connecting-ip
