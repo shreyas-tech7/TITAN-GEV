@@ -84,8 +84,10 @@ These checks need `GEV_SHARED_SECRET`, so `npm run verify:live` has to run them 
 
 ## Settings the Blueprint would have set
 
-I created this service through Render's API, not the Blueprint. Two settings differ from `render.yaml`, and the API call
-cannot set either one. Set them in the Render dashboard under Settings.
+I created this service through Render's API, not the Blueprint. The API call cannot set two settings that
+`render.yaml` sets, so I changed them in the Render dashboard afterward. Render's API now reports both.
 
-- **Health Check Path** is blank. Set it to `/healthz`.
-- **Auto-Deploy** is on every commit. `render.yaml` asks for **After CI checks pass**.
+- **Health Check Path** is `/healthz`. Render now waits for the gateway to report ready before it moves traffic to a new deploy.
+- **Auto-Deploy** is **After CI checks pass**, so a commit that fails the build workflow does not deploy.
+
+If you recreate the service by hand, set both again. Creating it from `render.yaml` sets them for you.
