@@ -2,8 +2,10 @@ name: Build and sync
 
 # Three jobs. "build" checks the wrapper tests, the pinned upstream (npm ci and npm run doctor),
 # a production build of the app, and an end to end gate test against that build. "docker" builds the
-# same image that Hugging Face builds and probes it. "sync" pushes main to the Space when the
-# HF_TOKEN repository secret exists and skips with a notice when it does not.
+# image that Render and Hugging Face build, runs it under a 512 MB limit, and probes it. "sync" pushes
+# main to a Hugging Face Space when the HF_TOKEN repository secret exists. Render deploys on its own
+# when its GitHub connection sees these checks pass. Runners are pinned to ubuntu-24.04 so a change
+# to the ubuntu-latest label cannot surprise the build.
 
 on:
   push:
@@ -16,12 +18,12 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
 
@@ -51,10 +53,10 @@ jobs:
         run: npm run smoke
 
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build the image
         run: docker build -t titan-gev:ci .
@@ -62,7 +64,7 @@ jobs:
       - name: Run the image and probe the gate
         run: |
           secret="$(openssl rand -hex 24)"
-          docker run -d --name gev -p 127.0.0.1:17860:7860 -e GEV_SHARED_SECRET="$secret" titan-gev:ci
+          docker run -d --name gev --memory 512m --memory-swap 512m -p 127.0.0.1:17860:7860 -e GEV_SHARED_SECRET="$secret" titan-gev:ci
           ready=""
           for _ in $(seq 1 60); do
             if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17860/healthz)" = "200" ]; then ready=yes; break; fi
@@ -71,15 +73,17 @@ jobs:
           [ -n "$ready" ] || { docker logs gev; exit 1; }
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17860/)" = "401" ] || { echo "expected 401 without a token"; exit 1; }
           if docker logs gev 2>&1 | grep -qF "$secret"; then echo "secret found in container logs"; exit 1; fi
+          [ "$(docker inspect -f '{{.State.OOMKilled}}' gev)" = "false" ] || { echo "the container hit the 512 MB limit"; exit 1; }
+          echo "app memory after start: $(docker stats --no-stream --format '{{.MemUsage}}' gev)"
           docker rm -f gev
 
   sync:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [build, docker]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check for the HF_TOKEN secret
         id: token
