@@ -60,5 +60,7 @@ would misuse a quota meant for models, and it would need a Python wrapper. This 
 
 - Whether Render asks for a card at sign-up for this account.
 - Whether Render's proxy leaves `Set-Cookie` with `Partitioned` untouched. The live verifier checks it.
+- Whether Render's free build environment has enough memory. The Vite build peaks near 1.4 GB. If the Render
+  build log shows an out-of-memory error, that is the cause.
 - The exact URL. Render uses `https://titan-gev.onrender.com` when the name is free and adds a suffix when it is not.
   Read the real URL from the Render dashboard.
