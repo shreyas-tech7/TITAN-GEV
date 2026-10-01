@@ -1,0 +1,23 @@
+{
+  "name": "TITAN-GEV (God's Eye View)",
+  "image": "mcr.microsoft.com/devcontainers/base:bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "24" }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "forwardPorts": [4173, 7860],
+  "portsAttributes": {
+    "4173": { "label": "God's Eye View dev server", "onAutoForward": "notify" },
+    "7860": { "label": "TITAN-GEV gated wrapper", "onAutoForward": "notify" }
+  },
+  "secrets": {
+    "CESIUM_ION_TOKEN": {
+      "description": "Optional free Cesium ion token, restricted under Allowed URLs. Without it the globe uses the keyless basemap.",
+      "documentationUrl": "https://cesium.com/learn/ion/cesium-ion-access-tokens/"
+    },
+    "GEV_SHARED_SECRET": {
+      "description": "Only for the gated wrapper (npm start). At least 32 characters. Must match the secret of the same name in the TITAN Worker.",
+      "documentationUrl": "https://github.com/shreyas-tech7/TITAN-GEV#secrets-and-settings"
+    }
+  }
+}
