@@ -1,0 +1,19 @@
+{
+  "name": "titan-gev",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gated host for the open source God's Eye View globe, embedded as a tab in the TITAN dashboard.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0 <25 || >=26 <27"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "upstream:fetch": "bash scripts/fetch-upstream.sh .upstream",
+    "upstream:build": "cd .upstream && PUPPETEER_SKIP_DOWNLOAD=1 npm ci --no-audit --no-fund && CESIUM_ION_TOKEN=__GEV_CESIUM_ION_TOKEN__ npx vite build",
+    "start": "GEV_APP_DIR=.upstream node server/index.mjs",
+    "dev:codespace": "cd .upstream && HOST=0.0.0.0 PORT=4173 npm run dev",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

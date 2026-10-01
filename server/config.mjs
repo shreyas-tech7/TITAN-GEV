@@ -1,0 +1,93 @@
+// Runtime configuration for the TITAN-GEV wrapper. Every value comes from the
+// environment. Secrets are read here and nowhere else, and they never reach a log.
+
+/** Only the dashboard origin may frame the app unless the operator widens this. */
+export const DEFAULT_FRAME_ANCESTORS = ['https://shreyas-tech7.github.io'];
+
+const MIN_SECRET_LENGTH = 32;
+const CESIUM_TOKEN_RE = /^[A-Za-z0-9._~+/=-]{20,4096}$/;
+
+function intFrom(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  if (value === undefined || value === '') return fallback;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) return fallback;
+  return parsed;
+}
+
+/** Keep only well-formed http(s) origins. Wildcards, paths, and junk are dropped. */
+export function parseOrigins(value) {
+  if (typeof value !== 'string') return [];
+  const origins = [];
+  for (const raw of value.split(/[\s,]+/)) {
+    if (!raw || raw.includes('*')) continue;
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
+    if (url.origin !== raw.replace(/\/+$/, '')) continue;
+    if (!origins.includes(url.origin)) origins.push(url.origin);
+  }
+  return origins;
+}
+
+export function loadConfig(env = process.env) {
+  const secret = (env.GEV_SHARED_SECRET ?? '').trim();
+  const configuredAncestors = parseOrigins(env.GEV_FRAME_ANCESTORS);
+  const cesiumRaw = (env.CESIUM_ION_TOKEN ?? '').trim();
+  return {
+    listenHost: env.GEV_LISTEN_HOST || '0.0.0.0',
+    listenPort: intFrom(env.GEV_LISTEN_PORT, 7860, { min: 1, max: 65535 }),
+    upstream: {
+      host: '127.0.0.1',
+      port: intFrom(env.GEV_UPSTREAM_PORT, 4173, { min: 1, max: 65535 }),
+    },
+    secret,
+    secretOk: secret.length >= MIN_SECRET_LENGTH,
+    frameAncestors: configuredAncestors.length > 0 ? configuredAncestors : DEFAULT_FRAME_ANCESTORS,
+    tokenMaxLifetimeSeconds: intFrom(env.GEV_TOKEN_MAX_LIFETIME_SECONDS, 600, { min: 30, max: 900 }),
+    clockSkewSeconds: intFrom(env.GEV_CLOCK_SKEW_SECONDS, 30, { min: 0, max: 120 }),
+    sessionIdleSeconds: intFrom(env.GEV_SESSION_IDLE_SECONDS, 1800, { min: 60, max: 7200 }),
+    sessionMaxSeconds: intFrom(env.GEV_SESSION_MAX_SECONDS, 21600, { min: 300, max: 43200 }),
+    rateUnauthPerMinute: intFrom(env.GEV_RATE_UNAUTH_PER_MIN, 30, { min: 1 }),
+    rateHealthPerMinute: intFrom(env.GEV_RATE_HEALTH_PER_MIN, 120, { min: 1 }),
+    rateApiPerMinute: intFrom(env.GEV_RATE_API_PER_MIN, 1200, { min: 1 }),
+    trustProxyHops: intFrom(env.GEV_TRUST_PROXY_HOPS, 1, { min: 0, max: 5 }),
+    maxBodyBytes: intFrom(env.GEV_MAX_BODY_BYTES, 1_048_576, { min: 1024 }),
+    upstreamTimeoutMs: intFrom(env.GEV_UPSTREAM_TIMEOUT_MS, 60_000, { min: 1000 }),
+    allowPaidRoutes: env.GEV_ALLOW_PAID_ROUTES === '1',
+    cesiumIonToken: CESIUM_TOKEN_RE.test(cesiumRaw) ? cesiumRaw : '',
+    cesiumIonTokenRejected: cesiumRaw !== '' && !CESIUM_TOKEN_RE.test(cesiumRaw),
+  };
+}
+
+// Environment the app process may see. Provider keys that are free to obtain pass
+// through. The gate secret, the Hugging Face token, the Cesium token (applied to
+// the built files by the wrapper), and the paid OpenAI and Google keys stay out.
+const CHILD_ENV_EXACT = new Set(['PATH', 'HOME', 'LANG', 'TZ', 'NODE_ENV', 'NODE_OPTIONS', 'TMPDIR']);
+const CHILD_ENV_PREFIXES = [
+  'OPENSKY_',
+  'TOMTOM_',
+  'FIRMS_',
+  'AISSTREAM_',
+  'LL2_',
+  'CCTV_',
+  'OVERPASS_',
+  'LOCAL_RECEIVER_',
+  'VITE_AIS_',
+];
+
+export function childEnv(env, { upstreamPort }) {
+  const out = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (CHILD_ENV_EXACT.has(key) || CHILD_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+      out[key] = value;
+    }
+  }
+  out.HOST = '127.0.0.1';
+  out.PORT = String(upstreamPort);
+  return out;
+}
