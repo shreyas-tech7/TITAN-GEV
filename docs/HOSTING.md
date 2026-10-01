@@ -56,11 +56,36 @@ would misuse a quota meant for models, and it would need a Python wrapper. This 
 - **Framing.** The gateway sends `frame-ancestors` for the dashboard origin only. Run `npm run verify:live` after the
   first deploy to confirm that Render adds no `X-Frame-Options` header of its own.
 
-## Unconfirmed
+## Confirmed on Render (2026-10-01)
 
-- Whether Render asks for a card at sign-up for this account.
-- Whether Render's proxy leaves `Set-Cookie` with `Partitioned` untouched. The live verifier checks it.
-- Whether Render's free build environment has enough memory. The Vite build peaks near 1.4 GB. If the Render
-  build log shows an out-of-memory error, that is the cause.
-- The exact URL. Render uses `https://titan-gev.onrender.com` when the name is free and adds a suffix when it is not.
-  Read the real URL from the Render dashboard.
+I created the service on 2026-10-01 and probed it from outside with no secret. These facts are now confirmed.
+
+- **URL.** The name was free, so the service answers at `https://titan-gev.onrender.com`. Render's API reports the same URL.
+- **Build memory.** Render's free-plan builder ran the Docker build, including the Vite build that peaks near 1.4 GB, with no
+  out of memory error. The first deploy went live 68 seconds after it started.
+- **No payment step.** Creating the free service through Render's API on this account asked for no card.
+- **Headers pass through.** Render's edge is Cloudflare. It left the gateway's response headers alone. `/healthz`
+  returned 200 with the dashboard origin in `access-control-allow-origin`. Every gateway response carried
+  `frame-ancestors https://shreyas-tech7.github.io` and none carried `X-Frame-Options`. A foreign origin got no CORS header.
+- **The gate holds.** With no token, `/`, `/assets/*`, `/api/setup/status` and `/api/realtime/token` all returned 401.
+  A garbage token returned 401. `PUT` returned 405.
+- **The rate limit keys on the real client.** Failed attempts started returning 429 after the budget ran out, and a random
+  `X-Forwarded-For` on each request did not avoid it. A request with a forged `cf-connecting-ip` never reached the
+  gateway. Cloudflare rejected it with error 1000.
+- **Wake time.** The service answered `/healthz` within 30 seconds of the deploy going live.
+
+## Still unconfirmed
+
+These checks need `GEV_SHARED_SECRET`, so `npm run verify:live` has to run them with the secret typed by a person.
+
+- Whether Render's edge leaves `Set-Cookie` with `Partitioned` untouched. A valid token is the only way to get that cookie.
+- That no response contains the secret.
+- That the globe loads in the dashboard iframe.
+
+## Settings the Blueprint would have set
+
+I created this service through Render's API, not the Blueprint. Two settings differ from `render.yaml`, and the API call
+cannot set either one. Set them in the Render dashboard under Settings.
+
+- **Health Check Path** is blank. Set it to `/healthz`.
+- **Auto-Deploy** is on every commit. `render.yaml` asks for **After CI checks pass**.

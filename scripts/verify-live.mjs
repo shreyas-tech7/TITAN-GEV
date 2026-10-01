@@ -1,6 +1,6 @@
-// Check a live TITAN-GEV Space from the outside.
+// Check a live TITAN-GEV host from the outside.
 //
-//   npm run verify:live -- https://cozmik7-titan-gev.hf.space
+//   npm run verify:live -- https://titan-gev.onrender.com
 //
 // The script asks for GEV_SHARED_SECRET with hidden input, so the value never
 // appears in shell history, process arguments, or output. Set GEV_SHARED_SECRET
@@ -14,7 +14,7 @@ const base = (process.argv[2] || process.env.GEV_URL || '').replace(/\/+$/, '');
 const dashboard = process.env.GEV_DASHBOARD_ORIGIN || 'https://shreyas-tech7.github.io';
 
 if (!/^https?:\/\//.test(base)) {
-  console.error('Usage: npm run verify:live -- <Space URL>');
+  console.error('Usage: npm run verify:live -- <host URL>');
   process.exit(2);
 }
 
@@ -72,7 +72,7 @@ const record = (response) => {
   return response;
 };
 
-// A sleeping Space needs a minute. Wake it and wait.
+// A sleeping host needs a minute. Wake it and wait.
 let health = null;
 for (let attempt = 0; attempt < 40 && !health; attempt += 1) {
   try {
@@ -83,7 +83,7 @@ for (let attempt = 0; attempt < 40 && !health; attempt += 1) {
   }
   if (!health) await new Promise((resolve) => setTimeout(resolve, 5000));
 }
-check('the Space answers /healthz', health !== null, 'no answer after about 3 minutes');
+check('the host answers /healthz', health !== null, 'no answer after about 3 minutes');
 if (!health) process.exit(1);
 
 check('healthz identifies the gateway', /"service":"titan-gev"/.test(health.text));
