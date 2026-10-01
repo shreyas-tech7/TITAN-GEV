@@ -365,3 +365,37 @@ test('no response ever contains the shared secret', async () => {
     await stack.stop();
   }
 });
+
+test('a trusted client address header decides the rate limit key and X-Forwarded-For is ignored', async () => {
+  const stack = await startStack({ env: { GEV_RATE_UNAUTH_PER_MIN: '2', GEV_CLIENT_IP_HEADER: 'cf-connecting-ip' } });
+  try {
+    const from = (ip, spoof) => request(stack.port, { path: '/', headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': spoof } });
+    assert.equal((await from('198.51.100.1', '1.1.1.1')).status, 401);
+    assert.equal((await from('198.51.100.1', '2.2.2.2')).status, 401);
+    assert.equal((await from('198.51.100.1', '3.3.3.3')).status, 429, 'rotating X-Forwarded-For does not dodge the limit');
+    assert.equal((await from('198.51.100.2', '1.1.1.1')).status, 401, 'another real client has its own budget');
+    // A missing or malformed header falls back to the socket address, never to X-Forwarded-For.
+    const noHeader = () => request(stack.port, { path: '/', headers: { 'x-forwarded-for': `9.9.9.${Math.floor(Math.random() * 200)}` } });
+    assert.equal((await noHeader()).status, 401);
+    assert.equal((await noHeader()).status, 401);
+    assert.equal((await noHeader()).status, 429);
+    const junk = () => request(stack.port, { path: '/', headers: { 'cf-connecting-ip': 'not an ip' } });
+    assert.equal((await junk()).status, 429, 'a junk header shares the socket address bucket');
+  } finally {
+    await stack.stop();
+  }
+});
+
+test('a valid redemption works even when that address already used up its failed attempts', async () => {
+  const stack = await startStack({ env: { GEV_RATE_UNAUTH_PER_MIN: '2' } });
+  try {
+    const sameClient = { 'x-forwarded-for': '203.0.113.50' };
+    assert.equal((await request(stack.port, { path: '/', headers: sameClient })).status, 401);
+    assert.equal((await request(stack.port, { path: '/', headers: sameClient })).status, 401);
+    assert.equal((await request(stack.port, { path: '/', headers: sameClient })).status, 429);
+    const redeemed = await request(stack.port, { path: `/?gev_token=${stack.token()}`, headers: sameClient });
+    assert.equal(redeemed.status, 200, 'a real session start is never blocked by someone else\'s noise');
+  } finally {
+    await stack.stop();
+  }
+});

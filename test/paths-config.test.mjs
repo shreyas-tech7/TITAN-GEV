@@ -115,6 +115,31 @@ test('the app process never sees the gate secret, the HF token, Cesium, or paid 
   assert.equal(child.TOMTOM_API_KEY, 'k');
   assert.equal(child.HOST, '127.0.0.1');
   assert.equal(child.PORT, '4173');
+  assert.equal(child.NODE_OPTIONS, '--max-old-space-size=256');
+});
+
+test('the app process never inherits NODE_OPTIONS and always gets the configured heap cap', () => {
+  const child = childEnv({ PATH: '/usr/bin', NODE_OPTIONS: '--inspect=0.0.0.0:9229' }, { upstreamPort: 4173, heapMb: 192 });
+  assert.equal(child.NODE_OPTIONS, '--max-old-space-size=192');
+});
+
+test('the listen port follows GEV_LISTEN_PORT, then PORT, then 7860', () => {
+  assert.equal(loadConfig({}).listenPort, 7860);
+  assert.equal(loadConfig({ PORT: '10000' }).listenPort, 10000);
+  assert.equal(loadConfig({ PORT: '10000', GEV_LISTEN_PORT: '8080' }).listenPort, 8080);
+  assert.equal(loadConfig({ PORT: 'junk' }).listenPort, 7860);
+  assert.equal(loadConfig({ PORT: '99999' }).listenPort, 7860);
+});
+
+test('the client address header, heap cap, and config loader validate their input', () => {
+  assert.equal(loadConfig({ GEV_CLIENT_IP_HEADER: 'CF-Connecting-IP' }).clientIpHeader, 'cf-connecting-ip');
+  for (const bad of ['', 'x y', 'a;b', 'a'.repeat(80), 'x\r\ny']) assert.equal(loadConfig({ GEV_CLIENT_IP_HEADER: bad }).clientIpHeader, '', bad);
+  assert.equal(loadConfig({}).appHeapMb, 256);
+  assert.equal(loadConfig({ GEV_APP_HEAP_MB: '10' }).appHeapMb, 256);
+  assert.equal(loadConfig({ GEV_APP_HEAP_MB: '384' }).appHeapMb, 384);
+  assert.equal(loadConfig({}).viteConfigLoader, 'native');
+  assert.equal(loadConfig({ GEV_VITE_CONFIG_LOADER: 'bundle' }).viteConfigLoader, 'bundle');
+  assert.equal(loadConfig({ GEV_VITE_CONFIG_LOADER: 'evil' }).viteConfigLoader, 'native');
 });
 
 test('token bucket allows the burst, then refuses, then refills', () => {

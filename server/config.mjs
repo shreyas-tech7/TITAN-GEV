@@ -39,7 +39,8 @@ export function loadConfig(env = process.env) {
   const cesiumRaw = (env.CESIUM_ION_TOKEN ?? '').trim();
   return {
     listenHost: env.GEV_LISTEN_HOST || '0.0.0.0',
-    listenPort: intFrom(env.GEV_LISTEN_PORT, 7860, { min: 1, max: 65535 }),
+    // GEV_LISTEN_PORT wins, then PORT (Render sets it), then the Hugging Face port.
+    listenPort: intFrom(env.GEV_LISTEN_PORT, intFrom(env.PORT, 7860, { min: 1, max: 65535 }), { min: 1, max: 65535 }),
     upstream: {
       host: '127.0.0.1',
       port: intFrom(env.GEV_UPSTREAM_PORT, 4173, { min: 1, max: 65535 }),
@@ -55,6 +56,16 @@ export function loadConfig(env = process.env) {
     rateHealthPerMinute: intFrom(env.GEV_RATE_HEALTH_PER_MIN, 120, { min: 1 }),
     rateApiPerMinute: intFrom(env.GEV_RATE_API_PER_MIN, 1200, { min: 1 }),
     trustProxyHops: intFrom(env.GEV_TRUST_PROXY_HOPS, 1, { min: 0, max: 5 }),
+    // Name of a header that the host's edge sets to the real client address, for example
+    // cf-connecting-ip on Render. When set, X-Forwarded-For is never used.
+    clientIpHeader: /^[a-z0-9-]{1,64}$/.test((env.GEV_CLIENT_IP_HEADER ?? '').trim().toLowerCase())
+      ? (env.GEV_CLIENT_IP_HEADER ?? '').trim().toLowerCase()
+      : '',
+    // The app process gets a V8 heap cap so a busy minute cannot push the container past a 512 MB limit.
+    appHeapMb: intFrom(env.GEV_APP_HEAP_MB, 256, { min: 64, max: 2048 }),
+    viteConfigLoader: ['native', 'bundle', 'runner'].includes(env.GEV_VITE_CONFIG_LOADER)
+      ? env.GEV_VITE_CONFIG_LOADER
+      : 'native',
     maxBodyBytes: intFrom(env.GEV_MAX_BODY_BYTES, 1_048_576, { min: 1024 }),
     upstreamTimeoutMs: intFrom(env.GEV_UPSTREAM_TIMEOUT_MS, 60_000, { min: 1000 }),
     allowPaidRoutes: env.GEV_ALLOW_PAID_ROUTES === '1',
@@ -66,7 +77,7 @@ export function loadConfig(env = process.env) {
 // Environment the app process may see. Provider keys that are free to obtain pass
 // through. The gate secret, the Hugging Face token, the Cesium token (applied to
 // the built files by the wrapper), and the paid OpenAI and Google keys stay out.
-const CHILD_ENV_EXACT = new Set(['PATH', 'HOME', 'LANG', 'TZ', 'NODE_ENV', 'NODE_OPTIONS', 'TMPDIR']);
+const CHILD_ENV_EXACT = new Set(['PATH', 'HOME', 'LANG', 'TZ', 'NODE_ENV', 'TMPDIR']);
 const CHILD_ENV_PREFIXES = [
   'OPENSKY_',
   'TOMTOM_',
@@ -79,7 +90,7 @@ const CHILD_ENV_PREFIXES = [
   'VITE_AIS_',
 ];
 
-export function childEnv(env, { upstreamPort }) {
+export function childEnv(env, { upstreamPort, heapMb = 256 }) {
   const out = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) continue;
@@ -89,5 +100,6 @@ export function childEnv(env, { upstreamPort }) {
   }
   out.HOST = '127.0.0.1';
   out.PORT = String(upstreamPort);
+  out.NODE_OPTIONS = `--max-old-space-size=${heapMb}`;
   return out;
 }

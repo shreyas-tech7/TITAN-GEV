@@ -49,8 +49,21 @@ gateway.server.listen(config.listenPort, config.listenHost, () => {
 const viteBin = path.join(appDir, 'node_modules', 'vite', 'bin', 'vite.js');
 child = spawn(
   process.execPath,
-  [viteBin, 'preview', '--host', '127.0.0.1', '--port', String(config.upstream.port), '--strictPort', '--outDir', runtimeDist],
-  { cwd: appDir, env: childEnv(process.env, { upstreamPort: config.upstream.port }), stdio: ['ignore', 'pipe', 'pipe'] },
+  [
+    viteBin,
+    'preview',
+    '--host', '127.0.0.1',
+    '--port', String(config.upstream.port),
+    '--strictPort',
+    '--outDir', runtimeDist,
+    // The native loader skips the esbuild bundling step. That saves about 250 MB of memory.
+    '--configLoader', config.viteConfigLoader,
+  ],
+  {
+    cwd: appDir,
+    env: childEnv(process.env, { upstreamPort: config.upstream.port, heapMb: config.appHeapMb }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  },
 );
 child.stdout.on('data', (chunk) => process.stdout.write(`[app] ${chunk}`));
 child.stderr.on('data', (chunk) => process.stderr.write(`[app] ${chunk}`));

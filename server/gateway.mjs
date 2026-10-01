@@ -5,6 +5,7 @@
 // never reflects why a request failed, never logs a query string, and never logs
 // a secret or a cookie.
 import http from 'node:http';
+import net from 'node:net';
 import {
   SESSION_COOKIE_NAME,
   issueSession,
@@ -48,12 +49,21 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
   }
 
   function clientIp(req) {
+    const socketAddress = req.socket.remoteAddress || 'unknown';
+    // A host edge that sets a trusted header (cf-connecting-ip on Render) wins. When that header
+    // is configured but missing or malformed, fall back to the socket address and never to
+    // X-Forwarded-For, whose first entries a client can write.
+    if (config.clientIpHeader) {
+      const raw = req.headers[config.clientIpHeader];
+      const value = (Array.isArray(raw) ? raw[0] : raw)?.split(',')[0].trim();
+      return value && net.isIP(value) ? value : socketAddress;
+    }
     const forwarded = req.headers['x-forwarded-for'];
     if (config.trustProxyHops > 0 && typeof forwarded === 'string' && forwarded) {
       const hops = forwarded.split(',').map((part) => part.trim()).filter(Boolean);
       if (hops.length > 0) return hops[Math.max(0, hops.length - config.trustProxyHops)];
     }
-    return req.socket.remoteAddress || 'unknown';
+    return socketAddress;
   }
 
   function readCookie(header, name) {
@@ -220,10 +230,14 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
     const session = authenticate(req);
 
     if (!session) {
-      const limited = unauthLimiter.take(`unauth:${ip}`);
-      if (!limited.ok) return tooManyRequests(res, limited.retryAfterSeconds);
+      // Only failed attempts spend the unauthenticated budget. A valid redemption never does,
+      // so one noisy visitor behind the same address cannot lock out a real session start.
+      const reject = () => {
+        const limited = unauthLimiter.take(`unauth:${ip}`);
+        return limited.ok ? unauthorized(req, res) : tooManyRequests(res, limited.retryAfterSeconds);
+      };
       const token = req.method === 'POST' ? null : target.searchParams.get(TOKEN_PARAM);
-      if (!token || !config.secretOk) return unauthorized(req, res);
+      if (!token || !config.secretOk) return reject();
       const nowMs = now();
       const verdict = verifyAccessToken(config.secret, token, {
         nowMs,
@@ -231,7 +245,7 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
         skewSeconds: config.clockSkewSeconds,
       });
       pruneUsedTokenIds(Math.floor(nowMs / 1000));
-      if (!verdict.ok || usedTokenIds.has(verdict.jti)) return unauthorized(req, res);
+      if (!verdict.ok || usedTokenIds.has(verdict.jti)) return reject();
       usedTokenIds.set(verdict.jti, verdict.exp);
       const issued = issueSession(config.secret, {
         nowMs,
