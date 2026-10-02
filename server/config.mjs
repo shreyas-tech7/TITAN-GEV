@@ -1,10 +1,12 @@
 // Runtime configuration for the TITAN-GEV wrapper. Every value comes from the
-// environment. Secrets are read here and nowhere else, and they never reach a log.
+// environment. The wrapper holds no secret of its own. GEV_VERIFY_KEY is a public
+// key, and the session key is random bytes made at start. Neither reaches a log.
+import { randomBytes } from 'node:crypto';
+import { importVerifyKey } from './token.mjs';
 
 /** Only the dashboard origin may frame the app unless the operator widens this. */
 export const DEFAULT_FRAME_ANCESTORS = ['https://shreyas-tech7.github.io'];
 
-const MIN_SECRET_LENGTH = 32;
 const CESIUM_TOKEN_RE = /^[A-Za-z0-9._~+/=-]{20,4096}$/;
 
 function intFrom(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -34,7 +36,7 @@ export function parseOrigins(value) {
 }
 
 export function loadConfig(env = process.env) {
-  const secret = (env.GEV_SHARED_SECRET ?? '').trim();
+  const verifyKey = importVerifyKey((env.GEV_VERIFY_KEY ?? '').trim());
   const configuredAncestors = parseOrigins(env.GEV_FRAME_ANCESTORS);
   const cesiumRaw = (env.CESIUM_ION_TOKEN ?? '').trim();
   return {
@@ -45,8 +47,11 @@ export function loadConfig(env = process.env) {
       host: '127.0.0.1',
       port: intFrom(env.GEV_UPSTREAM_PORT, 4173, { min: 1, max: 65535 }),
     },
-    secret,
-    secretOk: secret.length >= MIN_SECRET_LENGTH,
+    // The public key that checks access tokens. Null when GEV_VERIFY_KEY is missing or malformed.
+    verifyKey,
+    verifyKeyOk: verifyKey !== null,
+    // Signs session cookies. Random per process, so a restart ends every session.
+    sessionKey: randomBytes(32),
     frameAncestors: configuredAncestors.length > 0 ? configuredAncestors : DEFAULT_FRAME_ANCESTORS,
     tokenMaxLifetimeSeconds: intFrom(env.GEV_TOKEN_MAX_LIFETIME_SECONDS, 600, { min: 30, max: 900 }),
     clockSkewSeconds: intFrom(env.GEV_CLOCK_SKEW_SECONDS, 30, { min: 0, max: 120 }),
@@ -75,7 +80,7 @@ export function loadConfig(env = process.env) {
 }
 
 // Environment the app process may see. Provider keys that are free to obtain pass
-// through. The gate secret, the Hugging Face token, the Cesium token (applied to
+// through. The verify key, the Hugging Face token, the Cesium token (applied to
 // the built files by the wrapper), and the paid OpenAI and Google keys stay out.
 const CHILD_ENV_EXACT = new Set(['PATH', 'HOME', 'LANG', 'TZ', 'NODE_ENV', 'TMPDIR']);
 const CHILD_ENV_PREFIXES = [

@@ -40,7 +40,7 @@ would misuse a quota meant for models, and it would need a Python wrapper. This 
    133 MiB, peaked at 205 MiB, and was never killed.
 3. The gateway controls every response header and the cookie, so Render's proxy does not change the security model.
 4. The dashboard tab already handles a sleeping host. It shows "Waking up, this can take a minute" and retries.
-5. A Blueprint (`render.yaml`) turns setup into one form where you paste two secrets.
+5. A Blueprint (`render.yaml`) turns setup into one form where you paste two values.
 
 ## Behavior on Render that the code handles
 

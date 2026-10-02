@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { generateKeyPairSync } from 'node:crypto';
 import { loadConfig } from '../server/config.mjs';
 import { createGateway } from '../server/gateway.mjs';
 import { signAccessToken } from '../server/token.mjs';
 
-const SECRET = 'gateway-test-secret-that-is-long-enough-0000';
+function makeKeys() {
+  const pair = generateKeyPairSync('ed25519');
+  return { privateKey: pair.privateKey, x: pair.publicKey.export({ format: 'jwk' }).x };
+}
 const PARENT = 'https://dash.example';
 const START = 1_790_000_000_000;
 const silent = { warn() {}, error() {}, log() {} };
@@ -28,7 +32,7 @@ function request(port, { method = 'GET', path = '/', headers = {}, body } = {}) 
 }
 
 /** Start a stub app and a gateway in front of it. The clock is fake so expiry tests are exact. */
-async function startStack({ env = {}, ready = true, appUp = true } = {}) {
+async function startStack({ env = {}, ready = true, appUp = true, keys = makeKeys() } = {}) {
   const seen = [];
   const app = http.createServer((req, res) => {
     seen.push({ method: req.method, url: req.url, headers: req.headers });
@@ -45,7 +49,7 @@ async function startStack({ env = {}, ready = true, appUp = true } = {}) {
   if (!appUp) await new Promise((resolve) => app.close(resolve));
   const clock = { t: START };
   const config = loadConfig({
-    GEV_SHARED_SECRET: SECRET,
+    GEV_VERIFY_KEY: keys.x,
     GEV_FRAME_ANCESTORS: PARENT,
     GEV_UPSTREAM_PORT: String(appPort),
     ...env,
@@ -56,7 +60,8 @@ async function startStack({ env = {}, ready = true, appUp = true } = {}) {
     port,
     seen,
     clock,
-    token: (overrides = {}) => signAccessToken(SECRET, { nowMs: clock.t, ...overrides }),
+    keys,
+    token: (overrides = {}) => signAccessToken(keys.privateKey, { nowMs: clock.t, ...overrides }),
     async stop() {
       await gateway.close();
       if (appUp) await new Promise((resolve) => app.close(resolve));
@@ -131,7 +136,8 @@ test('rejects an expired token, a long-lived token, a bad signature, and a token
     stack.clock.t += 400_000;
     assert.equal((await request(stack.port, { path: `/?gev_token=${old}` })).status, 401);
     assert.equal((await request(stack.port, { path: `/?gev_token=${stack.token({ ttlSeconds: 7200 })}` })).status, 401);
-    const forged = signAccessToken('another-secret-that-is-also-long-enough-xx', { nowMs: stack.clock.t });
+    const attacker = makeKeys();
+    const forged = signAccessToken(attacker.privateKey, { nowMs: stack.clock.t });
     assert.equal((await request(stack.port, { path: `/?gev_token=${forged}` })).status, 401);
     assert.equal((await request(stack.port, { method: 'POST', path: `/?gev_token=${stack.token()}`, body: '{}' })).status, 401);
     assert.equal((await request(stack.port, { path: '/?gev_token=junk' })).status, 401);
@@ -140,16 +146,46 @@ test('rejects an expired token, a long-lived token, a bad signature, and a token
   }
 });
 
-test('fails closed when the shared secret is missing or weak', async () => {
-  for (const secret of ['', 'too-short']) {
-    const stack = await startStack({ env: { GEV_SHARED_SECRET: secret } });
+test('fails closed when the verify key is missing or malformed', async () => {
+  const keys = makeKeys();
+  const raw = Buffer.from(keys.x, 'base64url');
+  const badKeys = ['', 'too-short', `${keys.x}=`, Buffer.concat([raw, Buffer.from([0])]).toString('base64url')];
+  for (const GEV_VERIFY_KEY of badKeys) {
+    const stack = await startStack({ env: { GEV_VERIFY_KEY }, keys });
     try {
-      const token = signAccessToken(secret || 'x', { nowMs: stack.clock.t });
-      assert.equal((await request(stack.port, { path: `/?gev_token=${token}` })).status, 401);
+      // Even a token signed by the matching private key opens nothing without a valid public key.
+      assert.equal((await request(stack.port, { path: `/?gev_token=${stack.token()}` })).status, 401);
       assert.equal((await request(stack.port, { path: '/' })).status, 401);
+      assert.equal((await request(stack.port, { path: '/healthz' })).status, 200, 'health stays public');
     } finally {
       await stack.stop();
     }
+  }
+});
+
+test('a session cookie from one process does not work on another, so a restart ends sessions', async () => {
+  const keys = makeKeys();
+  const first = await startStack({ keys });
+  const second = await startStack({ keys });
+  try {
+    const cookie = await login(first);
+    assert.equal((await request(first.port, { path: '/', headers: { cookie } })).status, 200);
+    assert.equal((await request(second.port, { path: '/', headers: { cookie } })).status, 401);
+  } finally {
+    await first.stop();
+    await second.stop();
+  }
+});
+
+test('rejects the old gev1 shared secret token format', async () => {
+  const stack = await startStack();
+  try {
+    const old = 'gev1.1790000000.1790000300.AAAAAAAAAAAAAAAA.07QHX4dt7w8RC9MnAyXnXvjqQmow1nbYGjwAc6uOVPE';
+    assert.equal((await request(stack.port, { path: `/?gev_token=${old}` })).status, 401);
+    const swapped = stack.token().replace(/^gev2/, 'gev1');
+    assert.equal((await request(stack.port, { path: `/?gev_token=${swapped}` })).status, 401);
+  } finally {
+    await stack.stop();
   }
 });
 
@@ -344,23 +380,29 @@ test('returns a bare 502 when the app is down and refuses oversize bodies', asyn
   }
 });
 
-test('no response ever contains the shared secret', async () => {
+test('no response body ever contains the access token or the session cookie', async () => {
   const stack = await startStack();
   try {
+    const token = stack.token();
     const responses = [];
     responses.push(await request(stack.port, { path: '/' }));
     responses.push(await request(stack.port, { path: '/healthz', headers: { origin: PARENT } }));
     responses.push(await request(stack.port, { path: '/?gev_token=bad' }));
-    const redeemed = await request(stack.port, { path: `/?gev_token=${stack.token()}`, headers: { 'sec-fetch-dest': 'iframe' } });
+    const redeemed = await request(stack.port, { path: `/?gev_token=${token}`, headers: { 'sec-fetch-dest': 'iframe' } });
     responses.push(redeemed);
     const cookie = cookieFrom(redeemed);
+    const cookieValue = cookie.split('=').slice(1).join('=');
     responses.push(await request(stack.port, { path: '/', headers: { cookie } }));
     responses.push(await request(stack.port, { path: '/api/setup/status', headers: { cookie } }));
+    responses.push(await request(stack.port, { path: `/?gev_token=${token}` }));
     for (const response of responses) {
-      const dump = JSON.stringify(response);
-      assert.equal(dump.includes(SECRET), false);
-      assert.equal(dump.toLowerCase().includes('stack'), false);
+      assert.equal(response.body.includes(token), false);
+      assert.equal(response.body.includes(cookieValue), false);
+      assert.equal(JSON.stringify(response.headers).includes(token), false);
+      assert.equal(response.body.toLowerCase().includes('stack'), false);
     }
+    // Only the redemption response may carry the cookie, and only in Set-Cookie.
+    assert.ok(String(redeemed.headers['set-cookie']).includes(cookieValue));
   } finally {
     await stack.stop();
   }
