@@ -37,7 +37,7 @@ const record = (response) => {
   return response;
 };
 
-// A sleeping free host needs a minute or two. Wake it and wait.
+// A sleeping host needs a minute. Wake it and wait.
 let health = null;
 for (let attempt = 0; attempt < 40 && !health; attempt += 1) {
   try {
