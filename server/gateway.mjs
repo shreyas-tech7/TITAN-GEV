@@ -3,7 +3,7 @@
 // Every request except /healthz needs a valid session cookie. The cookie comes from
 // redeeming a short lived access token that the TITAN Worker mints. The gateway
 // never reflects why a request failed, never logs a query string, and never logs
-// a secret or a cookie.
+// a key or a cookie.
 import http from 'node:http';
 import net from 'node:net';
 import {
@@ -26,7 +26,6 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
   const apiLimiter = new TokenBucketLimiter({ perMinute: config.rateApiPerMinute, now });
   const usedTokenIds = new Map();
   const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
-  let warnedAboutSecret = false;
 
   const frameAncestorsPolicy = cspWithFrameAncestors('', config.frameAncestors);
   const baseHeaders = {
@@ -80,10 +79,10 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
   }
 
   function authenticate(req) {
-    if (!config.secretOk) return null;
+    if (!config.verifyKeyOk) return null;
     const value = readCookie(req.headers.cookie, SESSION_COOKIE_NAME);
     if (!value) return null;
-    const result = verifySession(config.secret, value, {
+    const result = verifySession(config.sessionKey, value, {
       nowMs: now(),
       maxSeconds: config.sessionMaxSeconds,
       skewSeconds: config.clockSkewSeconds,
@@ -94,7 +93,7 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
   function renewedCookie(session) {
     const policy = { nowMs: now(), idleSeconds: config.sessionIdleSeconds, maxSeconds: config.sessionMaxSeconds };
     if (!shouldRenewSession(session, policy)) return null;
-    return sessionCookie(issueSession(config.secret, { ...policy, sid: session.sid, start: session.start }));
+    return sessionCookie(issueSession(config.sessionKey, { ...policy, sid: session.sid, start: session.start }));
   }
 
   function wantsDocument(req) {
@@ -115,10 +114,6 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
     'h1{font-size:1rem;letter-spacing:.08em;margin:0 0 .5rem}p{margin:.25rem 0;color:#8b949e}</style>';
 
   function unauthorized(req, res) {
-    if (!config.secretOk && !warnedAboutSecret) {
-      warnedAboutSecret = true;
-      log.warn('[gev] GEV_SHARED_SECRET is missing or shorter than 32 characters. Every gated route returns 401.');
-    }
     if (wantsDocument(req)) {
       const page =
         `<!doctype html><meta charset="utf-8"><title>401 Unauthorized</title>${pageStyle}` +
@@ -237,9 +232,9 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
         return limited.ok ? unauthorized(req, res) : tooManyRequests(res, limited.retryAfterSeconds);
       };
       const token = req.method === 'POST' ? null : target.searchParams.get(TOKEN_PARAM);
-      if (!token || !config.secretOk) return reject();
+      if (!token || !config.verifyKeyOk) return reject();
       const nowMs = now();
-      const verdict = verifyAccessToken(config.secret, token, {
+      const verdict = verifyAccessToken(config.verifyKey, token, {
         nowMs,
         maxLifetimeSeconds: config.tokenMaxLifetimeSeconds,
         skewSeconds: config.clockSkewSeconds,
@@ -247,7 +242,7 @@ export function createGateway({ config, upstreamReady = () => true, now = Date.n
       pruneUsedTokenIds(Math.floor(nowMs / 1000));
       if (!verdict.ok || usedTokenIds.has(verdict.jti)) return reject();
       usedTokenIds.set(verdict.jti, verdict.exp);
-      const issued = issueSession(config.secret, {
+      const issued = issueSession(config.sessionKey, {
         nowMs,
         idleSeconds: config.sessionIdleSeconds,
         maxSeconds: config.sessionMaxSeconds,

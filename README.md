@@ -57,19 +57,24 @@ peaked at 205 MiB and was never killed.
 
 The host URL is public, so the gateway never acts as an open proxy.
 
-- **Access token.** The TITAN Worker mints `gev1.<iat>.<exp>.<id>.<signature>`. The signature is
-  HMAC-SHA256 over the first four parts with `GEV_SHARED_SECRET`. A token lives 5 minutes. The
-  gateway rejects any token that claims a lifetime over 10 minutes and accepts each token once.
+- **Access token.** The TITAN Worker signs `gev2.<iat>.<exp>.<id>.<signature>`. The signature is
+  Ed25519 over the first four parts, made with a private key that only the Worker holds. The gateway
+  checks it with the matching public key (`GEV_VERIFY_KEY`), so it can check tokens but never make one.
+  No secret sits on both sides. A token lives 5 minutes. The gateway rejects any token that claims a
+  lifetime over 10 minutes, any prefix other than `gev2`, any signature that is not exactly 64 bytes of
+  strict base64url, and accepts each token once.
 - **Session cookie.** A valid token becomes the cookie `__Host-gev_session` with `Secure`,
   `HttpOnly`, `SameSite=None`, and `Partitioned`. The partition lets the cookie work inside the
   dashboard iframe even when the browser blocks ordinary third party cookies. The session expires
-  after 30 idle minutes, slides while in use, and ends after 6 hours at most.
+  after 30 idle minutes, slides while in use, and ends after 6 hours at most. The gateway signs the
+  cookie with a random 32 byte key made at start, so a restart ends every session. The dashboard
+  reloads on the resulting 401 and asks the Worker for a fresh token.
 - **Redirect to a clean URL.** After the cookie is set, the page replaces the URL, so the token never
   stays in history or a Referer header.
 - **Plain 401.** A missing, expired, reused, or forged token returns a bare 401 page. The page never
   says which check failed.
-- **Fails closed.** If `GEV_SHARED_SECRET` is missing or shorter than 32 characters, every gated route
-  returns 401.
+- **Fails closed.** If `GEV_VERIFY_KEY` is missing or is not 32 bytes of strict base64url, the gateway
+  logs one line that names the variable and every gated route returns 401.
 - **Rate limits.** API routes allow 1200 requests per minute for each session. Failed attempts without a
   valid session allow 30 per minute for each client address. A valid redemption never spends that budget.
   Limits live in memory and reset on restart.
@@ -96,7 +101,7 @@ Secrets live in the host's secret store. Never put a value in git, a URL, or a c
 
 | Name | Where | Needed | Purpose |
 | --- | --- | --- | --- |
-| `GEV_SHARED_SECRET` | Render secret and Worker secret (the same value) | Yes | Signs and checks access tokens. Use 32 or more random characters. |
+| `GEV_VERIFY_KEY` | Render variable | Yes | The Worker's public signing key, the `x` value from its `GET /gev/jwks`. It is public, so it is safe to paste. The host can check tokens with it and cannot make them. |
 | `CESIUM_ION_TOKEN` | Render secret | No | Free Cesium ion token. Without it the globe uses the keyless basemap. |
 | `GEV_FRAME_ANCESTORS` | Render variable (the blueprint sets it) | No | Space separated dashboard origins. Defaults to `https://shreyas-tech7.github.io`. |
 | `GEV_CLIENT_IP_HEADER` | Render variable (the blueprint sets it) | On Render | Header that carries the real client address. `cf-connecting-ip` on Render. |
@@ -107,7 +112,12 @@ Secrets live in the host's secret store. Never put a value in git, a URL, or a c
 Restrict the Cesium ion token under **Allowed URLs** to the host origin. A Cesium ion token is meant for
 browsers, so treat it as a quota guard and not as a secret.
 
-The app process never sees `GEV_SHARED_SECRET`, `HF_TOKEN`, or the paid OpenAI and Google keys.
+The app process never sees `GEV_VERIFY_KEY`, `HF_TOKEN`, or the paid OpenAI and Google keys.
+
+The signing key itself lives only in the Worker secret `GEV_SIGNING_KEY`. The TITAN-Runner workflow
+**Provision GEV signing key** makes it inside a GitHub runner and pipes it straight into the Worker, so no
+person ever sees it. To rotate it, run that workflow with **rotate** set to true, then set the new public
+key as `GEV_VERIFY_KEY` here. See `docs/GODS-EYE-VIEW.md` in TITAN-Runner.
 
 Other tuning variables: `GEV_SESSION_IDLE_SECONDS`, `GEV_SESSION_MAX_SECONDS`, `GEV_RATE_API_PER_MIN`,
 `GEV_RATE_UNAUTH_PER_MIN`, `GEV_MAX_BODY_BYTES`, and `GEV_TRUST_PROXY_HOPS`. See `server/config.mjs`.
@@ -117,8 +127,8 @@ Other tuning variables: `GEV_SESSION_IDLE_SECONDS`, `GEV_SESSION_MAX_SECONDS`, `
 1. Sign in at <https://dashboard.render.com> and connect your GitHub account.
 2. Choose **New**, then **Blueprint**, pick this repository, and apply `render.yaml`. It creates a free Docker
    web service named `titan-gev`.
-3. Render asks for two values. Paste `GEV_SHARED_SECRET` (the same value that the Worker holds) and, if you have
-   one, `CESIUM_ION_TOKEN`. Leave the Cesium field blank to use the keyless basemap.
+3. Render asks for two values. Paste `GEV_VERIFY_KEY` (the public `x` value from the Worker's `GET /gev/jwks`)
+   and, if you have one, `CESIUM_ION_TOKEN`. Leave the Cesium field blank to use the keyless basemap.
 4. Wait for the first build. It takes a few minutes. Read the service URL on the Render page. It is
    `https://titan-gev.onrender.com` unless the name was taken.
 5. Set the dashboard repository variable `GEV_URL` to that URL and redeploy the dashboard.
@@ -129,16 +139,21 @@ minutes and wakes in about a minute. The dashboard tab shows a waking state and 
 
 ## Verify the live host
 
-After the service is live, run the live checks from your own terminal.
+After the service is live, run the live checks. They need no secret. The script takes a freshly minted
+access token from the environment variable `GEV_TOKEN`. Mint one from the Worker with `GET /gev/token`. A token
+works once, so mint a new one for every run. The **GEV live check** workflow in TITAN-Runner does all of this
+for you.
 
 ```bash
-npm run verify:live -- https://titan-gev.onrender.com
+GEV_TOKEN=<fresh token> npm run verify:live -- https://titan-gev.onrender.com
 ```
 
-The script asks for `GEV_SHARED_SECRET` with hidden input, so the value never reaches shell history, process
-arguments, or output. It checks that no token returns 401, a valid token returns 200, an expired token and a
-reused token are rejected, `frame-ancestors` names only the dashboard, Provider Settings and the paid voice
-route return 404, and no response contains the secret. A sleeping host gets up to three minutes to wake.
+It checks the health route and CORS, that no token returns 401, that a token signed by a throwaway attacker
+key returns 401, that the minted token returns 200, that the cookie is `Secure`, `HttpOnly`, `SameSite=None`,
+and `Partitioned`, that the same token fails a second time, that the cookie loads the app, that
+`frame-ancestors` names only the dashboard, that `X-Frame-Options` is absent, that Provider Settings and the
+paid voice route return 404, and that no response body holds the token or the cookie. It prints PASS and FAIL
+lines only. A sleeping host gets up to three minutes to wake.
 
 Then open the dashboard tab and confirm that the globe loads.
 
@@ -173,8 +188,8 @@ the next command, which listens on port 7860.
 npm run upstream:build && npm start
 ```
 
-Set `CESIUM_ION_TOKEN` and `GEV_SHARED_SECRET` as Codespaces secrets. The names also appear in
-`devcontainer.json`.
+Set `CESIUM_ION_TOKEN` as a Codespaces secret and `GEV_VERIFY_KEY` as a Codespaces secret or variable. The
+names also appear in `devcontainer.json`.
 
 Two limits apply:
 

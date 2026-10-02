@@ -37,8 +37,8 @@ log(
     ? 'Cesium ion token applied to the runtime build.'
     : 'No Cesium ion token set. The globe starts on the keyless basemap.',
 );
-if (!config.secretOk) {
-  log('GEV_SHARED_SECRET is missing or shorter than 32 characters. Every gated route will return 401.');
+if (!config.verifyKeyOk) {
+  log('GEV_VERIFY_KEY is missing or is not a valid Ed25519 public key. Every gated route will return 401.');
 }
 
 const gateway = createGateway({ config, upstreamReady: () => upstreamIsReady, log: console });

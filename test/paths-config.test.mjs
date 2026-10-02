@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -74,15 +75,27 @@ test('parseOrigins keeps clean origins and drops wildcards, paths, and junk', ()
   assert.deepEqual(parseOrigins(undefined), []);
 });
 
-test('loadConfig defaults to the dashboard origin and rejects a weak secret', () => {
-  const weak = loadConfig({ GEV_SHARED_SECRET: 'short' });
-  assert.equal(weak.secretOk, false);
+test('loadConfig defaults to the dashboard origin and rejects a bad verify key', () => {
+  const weak = loadConfig({ GEV_VERIFY_KEY: 'short' });
+  assert.equal(weak.verifyKeyOk, false);
+  assert.equal(weak.verifyKey, null);
   assert.deepEqual(weak.frameAncestors, DEFAULT_FRAME_ANCESTORS);
-  const strong = loadConfig({ GEV_SHARED_SECRET: 's'.repeat(32), GEV_FRAME_ANCESTORS: 'https://dash.example' });
-  assert.equal(strong.secretOk, true);
+  assert.equal(loadConfig({}).verifyKeyOk, false);
+  const x = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x;
+  const strong = loadConfig({ GEV_VERIFY_KEY: x, GEV_FRAME_ANCESTORS: 'https://dash.example' });
+  assert.equal(strong.verifyKeyOk, true);
+  assert.ok(strong.verifyKey);
   assert.deepEqual(strong.frameAncestors, ['https://dash.example']);
   assert.equal(strong.listenPort, 7860);
   assert.equal(strong.sessionMaxSeconds, 21_600);
+});
+
+test('loadConfig makes a fresh random 32 byte session key for every load', () => {
+  const first = loadConfig({});
+  const second = loadConfig({});
+  assert.equal(first.sessionKey.length, 32);
+  assert.equal(second.sessionKey.length, 32);
+  assert.notDeepEqual(first.sessionKey, second.sessionKey);
 });
 
 test('loadConfig falls back on out-of-range numbers and a malformed Cesium token', () => {
@@ -93,11 +106,11 @@ test('loadConfig falls back on out-of-range numbers and a malformed Cesium token
   assert.equal(config.cesiumIonTokenRejected, true);
 });
 
-test('the app process never sees the gate secret, the HF token, Cesium, or paid keys', () => {
+test('the app process never sees the verify key, the HF token, Cesium, or paid keys', () => {
   const env = {
     PATH: '/usr/bin',
     HOME: '/home/node',
-    GEV_SHARED_SECRET: 'x',
+    GEV_VERIFY_KEY: 'x',
     HF_TOKEN: 'x',
     CESIUM_ION_TOKEN: 'x',
     OPENAI_API_KEY: 'x',
@@ -108,7 +121,7 @@ test('the app process never sees the gate secret, the HF token, Cesium, or paid 
     HOST: '0.0.0.0',
   };
   const child = childEnv(env, { upstreamPort: 4173 });
-  for (const name of ['GEV_SHARED_SECRET', 'HF_TOKEN', 'CESIUM_ION_TOKEN', 'OPENAI_API_KEY', 'GOOGLE_MAPS_API_KEY']) {
+  for (const name of ['GEV_VERIFY_KEY', 'GEV_SIGNING_KEY', 'HF_TOKEN', 'CESIUM_ION_TOKEN', 'OPENAI_API_KEY', 'GOOGLE_MAPS_API_KEY']) {
     assert.equal(name in child, false, name);
   }
   assert.equal(child.OPENSKY_CLIENT_ID, 'id');

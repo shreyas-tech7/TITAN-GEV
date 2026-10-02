@@ -1,5 +1,5 @@
 # Render Blueprint for the free web service. Create it with New, then Blueprint, and point it at this repo.
-# Render asks for the two sync:false values during that first creation and stores them as secrets.
+# Render asks for the two sync:false values during that first creation.
 services:
   - type: web
     name: titan-gev
@@ -11,8 +11,9 @@ services:
     healthCheckPath: /healthz
     autoDeployTrigger: checksPass
     envVars:
-      # Required. At least 32 random characters. The Worker holds the same value.
-      - key: GEV_SHARED_SECRET
+      # Required. The Worker's public signing key, base64url of the 32 raw bytes (the JWK x value from
+      # GET /gev/jwks on the Worker). It is public, not a secret. The host cannot make tokens with it.
+      - key: GEV_VERIFY_KEY
         sync: false
       # Optional. The free Cesium ion token. Leave it blank for the keyless basemap.
       - key: CESIUM_ION_TOKEN

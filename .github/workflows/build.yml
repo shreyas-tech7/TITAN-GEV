@@ -61,10 +61,15 @@ jobs:
       - name: Build the image
         run: docker build -t titan-gev:ci .
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
       - name: Run the image and probe the gate
         run: |
-          secret="$(openssl rand -hex 24)"
-          docker run -d --name gev --memory 512m --memory-swap 512m -p 127.0.0.1:17860:7860 -e GEV_SHARED_SECRET="$secret" titan-gev:ci
+          # A throwaway key pair for this run. The container gets only the public half.
+          x="$(node -e 'const {generateKeyPairSync}=require("node:crypto");const k=generateKeyPairSync("ed25519");require("node:fs").writeFileSync(process.env.RUNNER_TEMP+"/gev-ci.pem",k.privateKey.export({type:"pkcs8",format:"pem"}));process.stdout.write(k.publicKey.export({format:"jwk"}).x)')"
+          docker run -d --name gev --memory 512m --memory-swap 512m -p 127.0.0.1:17860:7860 -e GEV_VERIFY_KEY="$x" titan-gev:ci
           ready=""
           for _ in $(seq 1 60); do
             if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17860/healthz)" = "200" ]; then ready=yes; break; fi
@@ -72,7 +77,12 @@ jobs:
           done
           [ -n "$ready" ] || { docker logs gev; exit 1; }
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17860/)" = "401" ] || { echo "expected 401 without a token"; exit 1; }
-          if docker logs gev 2>&1 | grep -qF "$secret"; then echo "secret found in container logs"; exit 1; fi
+          # A token signed by the matching private key opens the gate once and is then spent.
+          token="$(node --input-type=module -e 'import {createPrivateKey} from "node:crypto";import {readFileSync} from "node:fs";import {signAccessToken} from "./server/token.mjs";process.stdout.write(signAccessToken(createPrivateKey(readFileSync(process.env.RUNNER_TEMP+"/gev-ci.pem")), {}))')"
+          echo "::add-mask::$token"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:17860/?gev_token=$token")" = "200" ] || { echo "expected 200 for a valid token"; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:17860/?gev_token=$token")" = "401" ] || { echo "expected 401 when a token is reused"; exit 1; }
+          if docker logs gev 2>&1 | grep -qF "$token"; then echo "token found in container logs"; exit 1; fi
           [ "$(docker inspect -f '{{.State.OOMKilled}}' gev)" = "false" ] || { echo "the container hit the 512 MB limit"; exit 1; }
           echo "app memory after start: $(docker stats --no-stream --format '{{.MemUsage}}' gev)"
           docker rm -f gev
