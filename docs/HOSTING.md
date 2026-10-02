@@ -76,10 +76,10 @@ I created the service on 2026-10-01 and probed it from outside with no secret. T
 
 ## Still unconfirmed
 
-These checks need `GEV_SHARED_SECRET`, so `npm run verify:live` has to run them with the secret typed by a person.
+These checks need a freshly minted access token. The GEV live check workflow in TITAN-Runner mints one and runs `npm run verify:live`.
 
 - Whether Render's edge leaves `Set-Cookie` with `Partitioned` untouched. A valid token is the only way to get that cookie.
-- That no response contains the secret.
+- That no response contains the token or the cookie.
 - That the globe loads in the dashboard iframe.
 
 ## Settings the Blueprint would have set
