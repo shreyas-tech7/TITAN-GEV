@@ -1,9 +1,10 @@
 // End to end check. Starts the real wrapper in front of the real built app,
 // exercises the gate over HTTP, then stops everything it started.
 // Run after `npm run upstream:fetch` and `npm run upstream:build`.
-// The shared secret is random per run. Nothing here is a real credential.
+// The signing key pair is random per run and lives only in this process. The wrapper
+// gets the public half. Nothing here is a real credential.
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -68,7 +69,8 @@ async function stop(child) {
   });
 }
 
-const secret = randomBytes(24).toString('hex');
+const keys = generateKeyPairSync('ed25519');
+const verifyKey = keys.publicKey.export({ format: 'jwk' }).x;
 const cesiumDummy = `smoke.${randomBytes(18).toString('hex')}`;
 const port = await freePort();
 const upstreamPort = await freePort();
@@ -85,7 +87,7 @@ const child = spawn(process.execPath, [path.join(root, 'server', 'index.mjs')], 
     GEV_LISTEN_PORT: String(port),
     GEV_UPSTREAM_PORT: String(upstreamPort),
     GEV_RUNTIME_DIST: runtimeDist,
-    GEV_SHARED_SECRET: secret,
+    GEV_VERIFY_KEY: verifyKey,
     GEV_FRAME_ANCESTORS: PARENT,
     CESIUM_ION_TOKEN: cesiumDummy,
   },
@@ -94,7 +96,7 @@ const child = spawn(process.execPath, [path.join(root, 'server', 'index.mjs')], 
 child.stdout.on('data', (chunk) => output.push(String(chunk)));
 child.stderr.on('data', (chunk) => output.push(String(chunk)));
 
-let dump = '';
+let valid = '';
 try {
   await waitForReady(base, child);
   const seen = [];
@@ -108,17 +110,17 @@ try {
   seen.push(noToken);
   check('no token returns 401', noToken.status === 401);
 
-  const expired = signAccessToken(secret, { nowMs: Date.now() - 400_000 });
+  const expired = signAccessToken(keys.privateKey, { nowMs: Date.now() - 400_000 });
   const expiredResponse = await get(base, `/?gev_token=${expired}`);
   seen.push(expiredResponse);
   check('expired token is rejected', expiredResponse.status === 401);
 
-  const wrongKey = signAccessToken(randomBytes(24).toString('hex'), {});
+  const wrongKey = signAccessToken(generateKeyPairSync('ed25519').privateKey, {});
   const wrongResponse = await get(base, `/?gev_token=${wrongKey}`);
   seen.push(wrongResponse);
-  check('token signed with another secret is rejected', wrongResponse.status === 401);
+  check('token signed by another key is rejected', wrongResponse.status === 401);
 
-  const valid = signAccessToken(secret, {});
+  valid = signAccessToken(keys.privateKey, {});
   const redeemed = await get(base, `/?gev_token=${valid}`, { 'sec-fetch-dest': 'iframe' });
   seen.push(redeemed);
   check('valid token returns 200', redeemed.status === 200);
@@ -155,8 +157,7 @@ try {
   const probe = await get(base, '/__gev/session', { cookie });
   check('session probe answers 204', probe.status === 204);
 
-  dump = JSON.stringify(seen.map((entry) => [entry.status, [...entry.headers], entry.text.length > 200000 ? '' : entry.text]));
-  check('the shared secret appears in no response', !dump.includes(secret));
+  check('the access token appears in no response body', !seen.some((entry) => entry.text.includes(valid)));
 } catch (error) {
   check('smoke run completed', false, error.message);
 } finally {
@@ -165,7 +166,7 @@ try {
 }
 
 const logs = output.join('');
-check('the shared secret appears in no log line', !logs.includes(secret));
+check('the access token appears in no log line', valid !== '' && !logs.includes(valid));
 check('the Cesium token appears in no log line', !logs.includes(cesiumDummy));
 const stillListening = await fetch(`${base}/healthz`).then(() => true, () => false);
 check('everything the test started is stopped', !stillListening);

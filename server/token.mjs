@@ -1,23 +1,107 @@
 // Access token and session cookie format for the TITAN-GEV gate.
 //
-// Access token (minted by the TITAN Worker, redeemed once by this wrapper):
-//   gev1.<iat>.<exp>.<jti>.<sig>
-//   sig = base64url(HMAC-SHA256(GEV_SHARED_SECRET, "gev1.<iat>.<exp>.<jti>"))
+// Access token (signed by the TITAN Worker, redeemed once by this wrapper):
+//   gev2.<iat>.<exp>.<jti>.<sig>
+//   sig = base64url(Ed25519 signature over "gev2.<iat>.<exp>.<jti>")
+//
+// The Worker holds the private key. This wrapper holds only the public key
+// (GEV_VERIFY_KEY, the 32 raw bytes as base64url), so it can check tokens but
+// can never make one. The public key is not a secret.
 //
 // Session cookie (minted here, never by the Worker):
 //   gevs1.<sid>.<start>.<exp>.<sig>
-//   sig = base64url(HMAC-SHA256(HMAC-SHA256(secret, "gev-session-v1"), payload))
+//   sig = base64url(HMAC-SHA256(sessionKey, payload))
 //
-// The two formats use different prefixes and different keys, so a session
-// cookie can never pass as an access token and the reverse.
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+// The session key is 32 random bytes made when the process starts. A restart
+// ends every session. The two formats use different prefixes and different
+// algorithms, so a session cookie can never pass as an access token and the
+// reverse.
+import { createHmac, createPublicKey, randomBytes, sign, timingSafeEqual, verify } from 'node:crypto';
 
-export const ACCESS_PREFIX = 'gev1';
+export const ACCESS_PREFIX = 'gev2';
 export const SESSION_PREFIX = 'gevs1';
 export const SESSION_COOKIE_NAME = '__Host-gev_session';
 
 const ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const INT_RE = /^[0-9]{1,12}$/;
+const B64URL_RE = /^[A-Za-z0-9_-]+$/;
+const ED25519_PUBLIC_BYTES = 32;
+const ED25519_SIGNATURE_BYTES = 64;
+
+function fail(reason) {
+  return { ok: false, reason };
+}
+
+/**
+ * Decode strict base64url. It rejects padding, the standard alphabet, whitespace,
+ * and any text that is not the canonical encoding of its bytes. Returns a Buffer
+ * of exactly `bytes` length, or null.
+ */
+export function decodeStrictBase64Url(text, bytes) {
+  if (typeof text !== 'string' || text.length === 0 || !B64URL_RE.test(text)) return null;
+  const decoded = Buffer.from(text, 'base64url');
+  if (decoded.length !== bytes) return null;
+  return decoded.toString('base64url') === text ? decoded : null;
+}
+
+/** Turn GEV_VERIFY_KEY into a public key object, or null when it is not 32 raw bytes of base64url. */
+export function importVerifyKey(x) {
+  if (decodeStrictBase64Url(typeof x === 'string' ? x.trim() : x, ED25519_PUBLIC_BYTES) === null) return null;
+  try {
+    return createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: x.trim() }, format: 'jwk' });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sign an access token. The wrapper never calls this. It exists for the tests and the
+ * live check, which hold their own throwaway private keys. The TITAN Worker has its own
+ * WebCrypto twin of this format.
+ */
+export function signAccessToken(
+  privateKey,
+  { nowMs = Date.now(), ttlSeconds = 300, jti = randomBytes(12).toString('base64url') } = {},
+) {
+  const iat = Math.floor(nowMs / 1000);
+  const exp = iat + ttlSeconds;
+  const payload = `${ACCESS_PREFIX}.${iat}.${exp}.${jti}`;
+  return `${payload}.${sign(null, Buffer.from(payload), privateKey).toString('base64url')}`;
+}
+
+/**
+ * Check an access token against the public key. The reason string is for tests and
+ * counters only. Callers must never send it to a client.
+ */
+export function verifyAccessToken(
+  publicKey,
+  token,
+  { nowMs = Date.now(), maxLifetimeSeconds = 600, skewSeconds = 30 } = {},
+) {
+  if (!publicKey || typeof publicKey !== 'object') return fail('no-key');
+  if (typeof token !== 'string' || token.length > 256) return fail('malformed');
+  const parts = token.split('.');
+  if (parts.length !== 5 || parts[0] !== ACCESS_PREFIX) return fail('malformed');
+  const [, iatText, expText, jti, sigText] = parts;
+  if (!INT_RE.test(iatText) || !INT_RE.test(expText) || !ID_RE.test(jti)) return fail('malformed');
+  const signature = decodeStrictBase64Url(sigText, ED25519_SIGNATURE_BYTES);
+  if (!signature) return fail('malformed');
+  let signatureOk = false;
+  try {
+    signatureOk = verify(null, Buffer.from(`${ACCESS_PREFIX}.${iatText}.${expText}.${jti}`), publicKey, signature);
+  } catch {
+    signatureOk = false;
+  }
+  if (!signatureOk) return fail('bad-signature');
+  const iat = Number(iatText);
+  const exp = Number(expText);
+  const nowSeconds = Math.floor(nowMs / 1000);
+  if (exp <= iat) return fail('bad-lifetime');
+  if (exp - iat > maxLifetimeSeconds) return fail('too-long');
+  if (iat > nowSeconds + skewSeconds) return fail('from-future');
+  if (exp <= nowSeconds) return fail('expired');
+  return { ok: true, jti, iat, exp };
+}
 
 function hmacBase64Url(key, text) {
   return createHmac('sha256', key).update(text).digest('base64url');
@@ -29,57 +113,13 @@ function safeEqual(a, b) {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-function fail(reason) {
-  return { ok: false, reason };
-}
-
-/** Mint an access token. The TITAN Worker has its own WebCrypto twin of this. */
-export function signAccessToken(
-  secret,
-  { nowMs = Date.now(), ttlSeconds = 300, jti = randomBytes(12).toString('base64url') } = {},
-) {
-  const iat = Math.floor(nowMs / 1000);
-  const exp = iat + ttlSeconds;
-  const payload = `${ACCESS_PREFIX}.${iat}.${exp}.${jti}`;
-  return `${payload}.${hmacBase64Url(secret, payload)}`;
-}
-
-/**
- * Check an access token. The reason string is for tests and counters only.
- * Callers must never send it to a client.
- */
-export function verifyAccessToken(
-  secret,
-  token,
-  { nowMs = Date.now(), maxLifetimeSeconds = 600, skewSeconds = 30 } = {},
-) {
-  if (typeof secret !== 'string' || secret.length === 0) return fail('no-secret');
-  if (typeof token !== 'string' || token.length > 256) return fail('malformed');
-  const parts = token.split('.');
-  if (parts.length !== 5 || parts[0] !== ACCESS_PREFIX) return fail('malformed');
-  const [, iatText, expText, jti, sig] = parts;
-  if (!INT_RE.test(iatText) || !INT_RE.test(expText) || !ID_RE.test(jti) || !sig) {
-    return fail('malformed');
-  }
-  const expected = hmacBase64Url(secret, `${ACCESS_PREFIX}.${iatText}.${expText}.${jti}`);
-  if (!safeEqual(sig, expected)) return fail('bad-signature');
-  const iat = Number(iatText);
-  const exp = Number(expText);
-  const nowSeconds = Math.floor(nowMs / 1000);
-  if (exp <= iat) return fail('bad-lifetime');
-  if (exp - iat > maxLifetimeSeconds) return fail('too-long');
-  if (iat > nowSeconds + skewSeconds) return fail('from-future');
-  if (exp <= nowSeconds) return fail('expired');
-  return { ok: true, jti, iat, exp };
-}
-
-function sessionKey(secret) {
-  return createHmac('sha256', secret).update('gev-session-v1').digest();
+function validSessionKey(key) {
+  return Buffer.isBuffer(key) && key.length >= 32;
 }
 
 /** Mint a session cookie value. Pass `start` and `sid` again to slide an existing session. */
 export function issueSession(
-  secret,
+  sessionKey,
   { nowMs = Date.now(), idleSeconds, maxSeconds, sid = randomBytes(12).toString('base64url'), start } = {},
 ) {
   const nowSeconds = Math.floor(nowMs / 1000);
@@ -87,7 +127,7 @@ export function issueSession(
   const exp = Math.min(nowSeconds + idleSeconds, startSeconds + maxSeconds);
   const payload = `${SESSION_PREFIX}.${sid}.${startSeconds}.${exp}`;
   return {
-    value: `${payload}.${hmacBase64Url(sessionKey(secret), payload)}`,
+    value: `${payload}.${hmacBase64Url(sessionKey, payload)}`,
     sid,
     start: startSeconds,
     exp,
@@ -95,8 +135,8 @@ export function issueSession(
   };
 }
 
-export function verifySession(secret, value, { nowMs = Date.now(), maxSeconds, skewSeconds = 30 } = {}) {
-  if (typeof secret !== 'string' || secret.length === 0) return fail('no-secret');
+export function verifySession(sessionKey, value, { nowMs = Date.now(), maxSeconds, skewSeconds = 30 } = {}) {
+  if (!validSessionKey(sessionKey)) return fail('no-key');
   if (typeof value !== 'string' || value.length > 256) return fail('malformed');
   const parts = value.split('.');
   if (parts.length !== 5 || parts[0] !== SESSION_PREFIX) return fail('malformed');
@@ -104,7 +144,7 @@ export function verifySession(secret, value, { nowMs = Date.now(), maxSeconds, s
   if (!ID_RE.test(sid) || !INT_RE.test(startText) || !INT_RE.test(expText) || !sig) {
     return fail('malformed');
   }
-  const expected = hmacBase64Url(sessionKey(secret), `${SESSION_PREFIX}.${sid}.${startText}.${expText}`);
+  const expected = hmacBase64Url(sessionKey, `${SESSION_PREFIX}.${sid}.${startText}.${expText}`);
   if (!safeEqual(sig, expected)) return fail('bad-signature');
   const start = Number(startText);
   const exp = Number(expText);
