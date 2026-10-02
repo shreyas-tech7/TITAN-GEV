@@ -74,13 +74,21 @@ I created the service on 2026-10-01 and probed it from outside with no secret. T
   gateway. Cloudflare rejected it with error 1000.
 - **Wake time.** The service answered `/healthz` within 30 seconds of the deploy going live.
 
+## Confirmed by the live check (2026-10-02)
+
+The GEV live check workflow in TITAN-Runner mints a fresh access token, runs `npm run verify:live`, and drives a headless
+browser through the dashboard. Its latest runs passed every check.
+
+- **The cookie survives.** Render's edge leaves `Set-Cookie` with `Partitioned` untouched. The cookie kept `Secure`,
+  `HttpOnly`, `SameSite=None`, and `Partitioned`.
+- **No leaks.** No response body contains the token or the cookie.
+- **The globe loads.** In the dashboard iframe the status bar reads Reachable, the frame loads, no blocked cookie banner
+  shows, and the frame holds a canvas.
+
 ## Still unconfirmed
 
-These checks need a freshly minted access token. The GEV live check workflow in TITAN-Runner mints one and runs `npm run verify:live`.
-
-- Whether Render's edge leaves `Set-Cookie` with `Partitioned` untouched. A valid token is the only way to get that cookie.
-- That no response contains the token or the cookie.
-- That the globe loads in the dashboard iframe.
+- A live check that starts against a sleeping host. Both passing browser runs found the host awake. The workflow waits up to
+  120 seconds for a cold host, but no run has shown that wait end in Reachable.
 
 ## Settings the Blueprint would have set
 
